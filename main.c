@@ -2,7 +2,12 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #include <dirent.h>
 #include <modbus.h>
 #include <pthread.h>
@@ -11,6 +16,7 @@
 #include "sock.h"
 
 #define MAX_THREAD 100
+#define PERIOD     1
 
 typedef struct {
   pthread_t th;
@@ -67,17 +73,44 @@ const uint16_t UT_INPUT_REGISTERS_ADDRESS = 0x0;
 const uint16_t UT_INPUT_REGISTERS_NB      = 0x10;
 const uint16_t UT_INPUT_REGISTERS_TAB[]   = { 0, };
 
-void modbus_server_task(connect_t *cp) {
-  printf("%s called\n", __FUNCTION__);
+void modbus_client_task(connect_t *cp) {
+  uint16_t tab_registers[UT_REGISTERS_NB];
+  modbus_t *mb;
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    if ((fd = mb_connect(getaddrbyhost(cp->host), cp->port, &mb)) < 0) {
+      fprintf(stderr, "(%s:%d) Connection failed: %s\n", cp->host, cp->port, modbus_strerror(errno));
+      modbus_close(mb);
+      modbus_free(mb);
+      sleep(PERIOD);
+      continue;
+    }
+    if ((rc = modbus_read_registers(mb, 0, 5, tab_registers)) < 0) {
+      fprintf(stderr, "%s\n", modbus_strerror(errno));
+    }
+    else {
+        for (int i=0; i < rc; i++) {
+            printf("reg[%d]=%d (0x%X)\n", i, tab_registers[i], tab_registers[i]);
+        }
+    }
+    modbus_close(mb);
+    modbus_free(mb);
+    sleep(PERIOD);
+  }
 }
 
-void modbus_client_task(connect_t *cp) {
+void modbus_server_task(connect_t *cp) {
   fd_set fds, rfds;
   struct timeval tm;
   modbus_t *mb;
   modbus_mapping_t *mb_mapping;
   int fd, lfd, maxfd;
   int i, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
 
   if ((lfd = mb_listen (cp->port, &mb)) < 0) {
      fprintf(stderr, "Connection and listen failed: %s\n", modbus_strerror(errno));
@@ -117,7 +150,9 @@ void modbus_client_task(connect_t *cp) {
   while (1) {
     fds = rfds;
     settimeout(&tm,1,0);
-    if((rc = select(maxfd + 1, &fds, NULL, NULL, &tm)) < 0) return rc;
+    if((rc = select(maxfd + 1, &fds, NULL, NULL, &tm)) < 0) {
+      continue;
+    }
     if(FD_ISSET(lfd,&fds)) {
       int fd = mb_accept (lfd, mb);
       printf("Accept allocated socket fd is %d \n", fd);
@@ -129,6 +164,7 @@ void modbus_client_task(connect_t *cp) {
       if(FD_ISSET(sockfd, &fds)) {
         if((rc=modbus_receive(mb, messages)) < 0) {
           FD_CLR(sockfd, &rfds);
+          close(sockfd);
           printf("Client disconnected. socket fd is %d \n", sockfd);
           continue;
         }
@@ -155,6 +191,105 @@ void modbus_client_task(connect_t *cp) {
   }
 }
 
+void tcp_server_task(connect_t *cp) {
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+void tcp_client_task(connect_t *cp) {
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+void udp_server_task(connect_t *cp) {
+  struct sockaddr_in sin;
+  fd_set fds, rfds;
+  struct timeval tm;
+  int fd, rc, nbyte, slen = sizeof(sin);
+  char message[BUFSIZ];
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  fd = udphostsock(cp->host, cp->port);
+  FD_ZERO(&rfds);
+  FD_SET(fd, &rfds);
+
+  while (1) {
+    fds = rfds;
+    settimeout(&tm, 1, 0);
+    if((rc = select(fd + 1, &fds, NULL, NULL, &tm)) < 0) {
+      continue;
+    }
+    if(FD_ISSET(fd,&fds)) {
+      nbyte = recvfrom(fd, message, BUFSIZ, 0, (struct sockaddr*)&sin, &slen);
+      printf ("[DATA] Receiving...... %d bytes \n", nbyte);
+    }
+    sleep(PERIOD);
+  }
+}
+
+void udp_client_task(connect_t *cp) {
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+void http_server_task(connect_t *cp) {
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+void http_client_task(connect_t *cp) {
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+void mqtt_sub_task(connect_t *cp) {
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+void mqtt_pub_task(connect_t *cp) {
+  int fd, rc;
+
+  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+
+
 static void* task(void* args) {
   connect_t *cp = (connect_t*)args;
   if(!cp) return;
@@ -163,6 +298,14 @@ static void* task(void* args) {
 
   if(!strcmp(cp->type, "MODBUS-TCP-SERVER")) modbus_server_task(cp);
   if(!strcmp(cp->type, "MODBUS-TCP-CLIENT")) modbus_client_task(cp);
+  if(!strcmp(cp->type, "TCP-SERVER"))        tcp_server_task(cp);
+  if(!strcmp(cp->type, "TCP-CLIENT"))        tcp_client_task(cp);
+  if(!strcmp(cp->type, "UDP-SERVER"))        udp_server_task(cp);
+  if(!strcmp(cp->type, "UDP-CLIENT"))        udp_client_task(cp);
+  if(!strcmp(cp->type, "HTTP-SERVER"))       http_server_task(cp);
+  if(!strcmp(cp->type, "HTTP-CLIENT"))       http_client_task(cp);
+  if(!strcmp(cp->type, "MQTT-SUBSCRIBER"))   mqtt_sub_task(cp);
+  if(!strcmp(cp->type, "MQTT-PUBLISHER"))    mqtt_pub_task(cp);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
