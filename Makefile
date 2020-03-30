@@ -6,7 +6,7 @@ CFLAGS 	= -g -w $(INC)
 SRCS = main.c
 
 OBJS = $(SRCS:.c=.o)
-LIBS = -L./lib -lpopup -lpthread -L/usr/local/lib -lmodbus -Llibhttp/lib -lhttp -lpaho-mqtt3a 
+LIBS = -L./lib -lpopup -lpthread -L/usr/local/lib -lmodbus -L./libhttp/lib -lhttp -lpaho-mqtt3a -lm -lrt -ldl -lcurl
 
 TARGET 	= connect
 TESTS = modbus-server modbus-client udp-server udp-client tcp-server tcp-client tcp-test ipc-test

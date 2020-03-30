@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <libhttp.h>
+#include <curl/curl.h>
 
 #include "MQTTAsync.h"
 #include "MQTTClientPersistence.h"
@@ -324,36 +325,106 @@ void udp_client_task(connect_t *ch) {
 // HTTP
 //
 
-static int begin_request_handler(struct httplib_connection *conn)
+static int begin_request_handler(struct httplib_context *ctx, struct httplib_connection *conn)
 {
-  const struct httplib_request_info *ri = httplib_get_request_info(conn);
-  printf("%s \n", ri->uri);
+  char content[BUFSIZ];
+  const struct lh_rqi_t *ri = httplib_get_request_info(conn);
+  connect_t *ch = (connect_t *)ri->user_data;
+
+  if(!strcmp(ri->request_method, "POST")) {
+    int nbyte = httplib_read(ctx, conn, content, sizeof(content));
+    dump(content, nbyte);
+    sendq(ch->queue, (char*)content, nbyte);
+  } 
+  else {
+    int content_length = snprintf(content, sizeof(content), "Hello from connect! Remote port: %d", ri->remote_port);
+
+    httplib_printf(ctx, conn,
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/plain\r\n"
+      "Content-Length: %d\r\n"
+      "\r\n"
+      "%s", content_length, content);
+  }
+  return 1;
+}
+
+struct string {
+  char *ptr;
+  size_t len;
+};
+
+void init_string(struct string *s) {
+  s->len = 0;
+  s->ptr = malloc(s->len+1);
+  if (s->ptr == NULL) {
+    fprintf(stderr, "malloc() failed\n");
+    exit(EXIT_FAILURE);
+  }
+  s->ptr[0] = '\0';
+}
+
+size_t begin_response_handler (void *ptr, size_t size, size_t nmemb, struct string *s)
+{
+  size_t new_len = s->len + size*nmemb;
+  s->ptr = realloc(s->ptr, new_len+1);
+  if (s->ptr == NULL) {
+    fprintf(stderr, "realloc() failed\n");
+    exit(EXIT_FAILURE);
+  }
+  memcpy(s->ptr+s->len, ptr, size*nmemb);
+  s->ptr[new_len] = '\0';
+  s->len = new_len;
+
+  return size*nmemb;
 }
 
 void http_server_task(connect_t *ch) {
   int fd, rc;
+  char port[BUFSIZ];
+  sprintf(port, "%d", ch->port);
+
   struct httplib_context *ctx;
-  char *options[] = {"listening_ports", "8080", NULL};
-  struct httplib_callbacks callbacks;
+  char *options[] = {"listening_ports", port, NULL};
+  struct lh_clb_t callbacks;
+
+  CONNECTmessage(ch, "HTTP  (S)");
 
   memset(&callbacks, 0, sizeof(callbacks));
   callbacks.begin_request = begin_request_handler;
-  ctx = httplib_start(&callbacks, NULL, options);
-  
-
-  CONNECTmessage(ch, "HTTP  (S)");
+  ctx = httplib_start(&callbacks, ch, options);
   while (1) {
     sleep(PERIOD);
   }
+  httplib_stop(ctx);
+  return 0;
 }
 
 void http_client_task(connect_t *ch) {
   int fd, rc;
+  char uri[BUFSIZ], body[BUFSIZ];
+  CURL* curl;
+  CURLcode res;
 
   CONNECTmessage(ch, "HTTP  (C)");
-  printf ("%s| %s:%d (%x)\n", MYTASK, ch->host, ch->port, ntohl(getaddrbyhost(ch->host)));
-
   while (1) {
+    struct string body;
+    init_string(&body);
+
+    curl = curl_easy_init();
+    sprintf(uri, "http://%s:%d/", ch->host, ch->port);
+
+    curl_easy_setopt (curl, CURLOPT_URL, uri);
+    curl_easy_setopt (curl, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_easy_setopt (curl, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_easy_setopt (curl, CURLOPT_FOLLOWLOCATION, 1);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, begin_response_handler);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    if((res = curl_easy_perform (curl)) != CURLE_OK) {
+      fprintf(stderr, "Failed %s \n", curl_easy_strerror(res));
+    }
+    sendq(ch->queue, (char*)body.ptr, body.len);
+    curl_easy_cleanup(curl);
     sleep(PERIOD);
   }
 }
@@ -561,7 +632,6 @@ void getFiles (char* d) {
         getconf(path, "messageq", v); ch->queue = strtol(v, NULL, 16);
         ch->id = max_thread;
 
-        printf("initq %s %lx \n", ch->name, ch->queue);
         initq (ch->queue);
         pthread_create(&ch->th, NULL, task, ch);
         max_thread++;
@@ -574,6 +644,7 @@ void getFiles (char* d) {
 int
 main (int argc, char *argv[])
 {
+  curl_global_init(CURL_GLOBAL_ALL);
   char name[BUFSIZ];
   int c;
   while( (c = getopt(argc, argv, "n:h")) != -1) {
@@ -590,4 +661,5 @@ main (int argc, char *argv[])
     pthread_join(ch->th, NULL);
   }
   pthread_exit (0);
+  curl_global_cleaup();
 }
