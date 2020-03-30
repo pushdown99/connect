@@ -11,12 +11,24 @@
 #include "sock.h"
 
 typedef struct {
+  pthread_t th;
+  int       id;
+  char      path[64];
+  char      name[64];
+  char      host[64];
+  char      type[64];
+  char      topic[64];
+  long      queue;
+  uint16_t  port;
+} connect_t;
+
+typedef struct {
   uint16_t  transaction_id;
   uint16_t  protocol_id;
   uint16_t  length;
   uint8_t   unit_identifier;
   uint8_t   payload[0];
-} modbus_header_t; 
+} modbus_header_t;
 
 typedef struct {
   uint8_t   code;     // Function code

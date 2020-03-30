@@ -7,18 +7,22 @@
 
 #define PERIOD 1
 
-int udp_client (uint16_t port)
+int tcp_client (uint16_t port)
 {
   struct sockaddr_in sin;
   char message[BUFSIZ];
   int fd, nbyte;
 
   while (1) {
-    fd = udpsock(0);
+    if((fd = tcp_connect("127.0.0.1", port)) < 0) {
+      sleep (PERIOD);
+      continue;
+    }
+
     bzero((char*)&sin,sizeof(sin));
     sin.sin_family      = AF_INET;
-    sin.sin_addr.s_addr = getaddrbyhost("127.0.0.1");
-    sin.sin_port        = htons(9009);
+    sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+    sin.sin_port        = htons(9007);
 
     strcpy(message, "HELLO WORLD");
     if((nbyte=sendto(fd, message, strlen(message), 0, (struct sockaddr*)&sin, sizeof(sin))) <= 0) {
@@ -31,6 +35,6 @@ int udp_client (uint16_t port)
 
 int main()
 {
-  udp_client (9009);
+  tcp_client (9007);
 }
 

@@ -12,7 +12,12 @@
 #include <modbus.h>
 #include <pthread.h>
 #include <errno.h>
+#include <libhttp.h>
 
+#include "MQTTAsync.h"
+#include "MQTTClientPersistence.h"
+
+#include "__ipc.h"
 #include "sock.h"
 
 #define MAX_THREAD 100
@@ -55,6 +60,12 @@ connect_t *CH[MAX_THREAD] = { NULL, };
 
 extern int errno;
 
+#define CONNECTmessage(ch, t) \
+  char MYTASK[] = t;           \
+do {                           \
+  printf ("%s| %s:%d (%x)\n", MYTASK, ch->host, ch->port, ntohl(getaddrbyhost(ch->host))); \
+} while (0)
+
 ///////////////////////////////////////////////////////////////////////////////
 
 const uint16_t UT_BITS_ADDRESS            = 0x0;
@@ -73,16 +84,16 @@ const uint16_t UT_INPUT_REGISTERS_ADDRESS = 0x0;
 const uint16_t UT_INPUT_REGISTERS_NB      = 0x10;
 const uint16_t UT_INPUT_REGISTERS_TAB[]   = { 0, };
 
-void modbus_client_task(connect_t *cp) {
+void modbus_client_task(connect_t *ch) {
   uint16_t tab_registers[UT_REGISTERS_NB];
   modbus_t *mb;
   int fd, rc;
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+  CONNECTmessage(ch, "MODBUS(C)");
 
   while (1) {
-    if ((fd = mb_connect(getaddrbyhost(cp->host), cp->port, &mb)) < 0) {
-      fprintf(stderr, "(%s:%d) Connection failed: %s\n", cp->host, cp->port, modbus_strerror(errno));
+    if ((fd = mb_connect(getaddrbyhost(ch->host), ch->port, &mb)) < 0) {
+      //fprintf(stderr, "(%s:%d) Connection failed: %s\n", ch->host, ch->port, modbus_strerror(errno));
       modbus_close(mb);
       modbus_free(mb);
       sleep(PERIOD);
@@ -102,7 +113,7 @@ void modbus_client_task(connect_t *cp) {
   }
 }
 
-void modbus_server_task(connect_t *cp) {
+void modbus_server_task(connect_t *ch) {
   fd_set fds, rfds;
   struct timeval tm;
   modbus_t *mb;
@@ -110,15 +121,15 @@ void modbus_server_task(connect_t *cp) {
   int fd, lfd, maxfd;
   int i, rc;
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+  CONNECTmessage(ch, "MODBUS(S)");
 
-  if ((lfd = mb_listen (cp->port, &mb)) < 0) {
+  if ((lfd = mb_listen (ch->port, &mb)) < 0) {
      fprintf(stderr, "Connection and listen failed: %s\n", modbus_strerror(errno));
      return;
   }
   int header_length = modbus_get_header_length(mb);
   maxfd = lfd;
-  printf("Listen allocated socket fd is %d \n", lfd);
+  printf("%s| -- listen allocated socket (fd: %d) \n", MYTASK, lfd);
 
   char* messages = malloc(MODBUS_TCP_MAX_ADU_LENGTH);
   modbus_set_debug(mb, FALSE);
@@ -155,7 +166,8 @@ void modbus_server_task(connect_t *cp) {
     }
     if(FD_ISSET(lfd,&fds)) {
       int fd = mb_accept (lfd, mb);
-      printf("Accept allocated socket fd is %d \n", fd);
+      printf("%s| -- accept socket (fd: %d) \n", MYTASK, fd);
+      if(fd < 0) continue;
       maxfd = (maxfd > fd)? maxfd : fd;
       FD_SET(fd,&rfds);
       continue;
@@ -165,9 +177,11 @@ void modbus_server_task(connect_t *cp) {
         if((rc=modbus_receive(mb, messages)) < 0) {
           FD_CLR(sockfd, &rfds);
           close(sockfd);
-          printf("Client disconnected. socket fd is %d \n", sockfd);
+          printf("%s| -- client disconnected. (fd: %d) \n", MYTASK, sockfd);
           continue;
         }
+        printf ("%s| -- modbus-tcp data received. (fd:%d, %d bytes) \n", MYTASK, sockfd, rc);
+
         modbus_header_t *mh = (modbus_header_t*)messages;
         switch(*(uint8_t*)mh->payload) {
         case MODBUS_FC_READ_COILS                :
@@ -191,36 +205,81 @@ void modbus_server_task(connect_t *cp) {
   }
 }
 
-void tcp_server_task(connect_t *cp) {
-  int fd, rc;
+void tcp_server_task(connect_t *ch) {
+  struct sockaddr_in sin;
+  fd_set fds, rfds;
+  struct timeval tm;
+  int fd, lfd, maxfd, rc, nbyte, slen = sizeof(sin);
+  char message[BUFSIZ];
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+  CONNECTmessage(ch, "TCP   (S)");
+
+  lfd = tcp_listen (ch->port);
+  maxfd = lfd;
+  printf("%s| -- listen allocated socket (fd: %d) \n", MYTASK, lfd);
+
+  FD_ZERO(&rfds);
+  FD_SET(lfd, &rfds);
 
   while (1) {
+    fds = rfds;
+    settimeout(&tm,1,0);
+    if((rc = select(maxfd + 1, &fds, NULL, NULL, &tm)) < 0) {
+      continue;
+    }
+    if(FD_ISSET(lfd,&fds)) {
+      int fd = accept (lfd, &sin, &slen);
+      printf("%s| -- accept socket (fd: %d) \n", MYTASK, fd);
+      maxfd = (maxfd > fd)? maxfd : fd;
+      FD_SET(fd,&rfds);
+      continue;
+    }
+    for(int sockfd = lfd + 1; sockfd <= maxfd; sockfd++) {
+      if(FD_ISSET(sockfd, &fds)) {
+        nbyte = recvfrom(sockfd, message, BUFSIZ, 0, (struct sockaddr*)&sin, &slen);
+        if(nbyte <= 0) {
+          FD_CLR (sockfd, &rfds);
+          close (sockfd);
+          printf("%s| -- client disconnected. (fd: %d) \n", MYTASK, sockfd);
+        }
+        printf ("%s| -- tcp data received. (fd:%d, %d bytes) \n", MYTASK, sockfd, nbyte);
+      }
+    }
+  }
+}
+
+void tcp_client_task(connect_t *ch) {
+  int fd, nbyte;
+  char message[BUFSIZ];
+
+  CONNECTmessage(ch, "TCP   (C)");
+  while (1) {
+    if((fd = tcp_connect(ch->host, ch->port)) < 0) {
+      sleep (PERIOD);
+      continue;
+    }
+
+    strcpy(message, "HELLO WORLD");
+    if((nbyte=send(fd, message, strlen(message), 0)) < 0) {
+      close (fd);
+      continue;
+    }
+    printf ("%s| -- tcp data sent. (fd:%d, %d bytes) \n", MYTASK, fd, nbyte);
+
     sleep(PERIOD);
   }
 }
 
-void tcp_client_task(connect_t *cp) {
-  int fd, rc;
-
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
-
-  while (1) {
-    sleep(PERIOD);
-  }
-}
-
-void udp_server_task(connect_t *cp) {
+void udp_server_task(connect_t *ch) {
   struct sockaddr_in sin;
   fd_set fds, rfds;
   struct timeval tm;
   int fd, rc, nbyte, slen = sizeof(sin);
   char message[BUFSIZ];
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+  CONNECTmessage(ch, "UDP   (S)");
 
-  fd = udphostsock(cp->host, cp->port);
+  fd = udphostsock(ch->host, ch->port);
   FD_ZERO(&rfds);
   FD_SET(fd, &rfds);
 
@@ -232,80 +291,238 @@ void udp_server_task(connect_t *cp) {
     }
     if(FD_ISSET(fd,&fds)) {
       nbyte = recvfrom(fd, message, BUFSIZ, 0, (struct sockaddr*)&sin, &slen);
-      printf ("[DATA] Receiving...... %d bytes \n", nbyte);
+      printf ("%s| -- udp data received. (fd:%d, %d bytes) \n", MYTASK, fd, nbyte);
     }
     sleep(PERIOD);
   }
 }
 
-void udp_client_task(connect_t *cp) {
+void udp_client_task(connect_t *ch) {
+  struct sockaddr_in sin;
+  char message[BUFSIZ];
+  int fd, nbyte;
+
+  CONNECTmessage(ch, "UDP   (C)");
+  while (1) {
+    fd = udpsock(0);
+    bzero((char*)&sin,sizeof(sin));
+    sin.sin_family      = AF_INET;
+    sin.sin_addr.s_addr = getaddrbyhost(ch->host);
+    sin.sin_port        = htons(ch->port);
+
+    strcpy(message, "HELLO WORLD");
+    if((nbyte=sendto(fd, message, strlen(message), 0, (struct sockaddr*)&sin, sizeof(sin))) <= 0) {
+      continue;
+    }
+    printf ("%s| -- udp data sent. (%d bytes) \n", MYTASK,strlen(message));
+    sleep (PERIOD);
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// HTTP
+//
+
+static int begin_request_handler(struct httplib_connection *conn)
+{
+  const struct httplib_request_info *ri = httplib_get_request_info(conn);
+  printf("%s \n", ri->uri);
+}
+
+void http_server_task(connect_t *ch) {
+  int fd, rc;
+  struct httplib_context *ctx;
+  char *options[] = {"listening_ports", "8080", NULL};
+  struct httplib_callbacks callbacks;
+
+  memset(&callbacks, 0, sizeof(callbacks));
+  callbacks.begin_request = begin_request_handler;
+  ctx = httplib_start(&callbacks, NULL, options);
+  
+
+  CONNECTmessage(ch, "HTTP  (S)");
+  while (1) {
+    sleep(PERIOD);
+  }
+}
+
+void http_client_task(connect_t *ch) {
   int fd, rc;
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+  CONNECTmessage(ch, "HTTP  (C)");
+  printf ("%s| %s:%d (%x)\n", MYTASK, ch->host, ch->port, ntohl(getaddrbyhost(ch->host)));
 
   while (1) {
     sleep(PERIOD);
   }
 }
 
-void http_server_task(connect_t *cp) {
-  int fd, rc;
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// MQTT
+//
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+char *topic     = "kaa/12";
+char *clientid  = "paho-c-sub";
+int qos         = 0;
+volatile int finished = 0;
+int subscribed = 0;
+int disconnected = 0;
 
-  while (1) {
-    sleep(PERIOD);
+typedef struct {
+  MQTTAsync client;
+  connect_t *ch;
+} MQTTContext;
+
+int messageArrived(void *context, char *topicName, int topicLen, MQTTAsync_message *message) {
+    connect_t* ch = (connect_t*)context;
+    printf("[mqtt] received %d Bytes, Topic: %s, ", message->payloadlen, topicName);
+    printf("Payload: %.*s\n", message->payloadlen, (char*)message->payload);
+
+    printf("%.*s", message->payloadlen, (char*)message->payload);
+    sendq(ch->queue, (char*)message->payload, message->payloadlen);
+
+    MQTTAsync_freeMessage(&message);
+    MQTTAsync_free(topicName);
+    return 1;
+}
+
+void onConnectLost (void *context, char *cause)
+{
+  MQTTAsync client = (MQTTAsync)context;
+  MQTTAsync_connectOptions opts = MQTTAsync_connectOptions_initializer;
+  int rc;
+  printf("\nConnection lost\n     cause: %s\nReconnecting\n", cause);
+  opts.keepAliveInterval = 20;
+  opts.cleansession      = 1;
+
+  if ((rc = MQTTAsync_connect(client, &opts)) != MQTTASYNC_SUCCESS) {
+    fprintf(stderr, "Failed to start connect, return code %d\n", rc);
+    finished = 1;
   }
 }
 
-void http_client_task(connect_t *cp) {
-  int fd, rc;
+void onDisconnect(void* context, MQTTAsync_successData* response) {
+    disconnected = 1;
+}
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+void onSubscribe(void* context, MQTTAsync_successData* response) {
+    subscribed = 1;
+}
 
-  while (1) {
-    sleep(PERIOD);
+void onSubscribeFailure(void* context, MQTTAsync_failureData* response) {
+    fprintf(stderr, "Subscribe failed, rc %s\n", MQTTAsync_strerror(response->code));
+    finished = 1;
+}
+
+void onConnect(void* context, MQTTAsync_successData* response) {
+  MQTTContext *c                 = (MQTTContext*)context;
+  MQTTAsync client               = (MQTTAsync)c->client;
+  MQTTAsync_responseOptions opts = MQTTAsync_responseOptions_initializer;
+  int rc;
+
+  if(!strcmp(c->ch->type, "MQTT-SUBSCRIBER")) {
+    printf("Subscribing to topic %s with client %s at QoS %d\n", c->ch->topic, c->ch->name, qos);
+
+    rc = MQTTAsync_setCallbacks(client, c, NULL, messageArrived, NULL);
+    if (rc != MQTTASYNC_SUCCESS) {
+        fprintf(stderr, "Failed to set callbacks, return code: %s\n", MQTTAsync_strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+
+    opts.onSuccess = onSubscribe;
+    opts.onFailure = onSubscribeFailure;
+    opts.context = client;
+    if ((rc = MQTTAsync_subscribe(client, c->ch->topic, qos, &opts)) != MQTTASYNC_SUCCESS) {
+        fprintf(stderr, "Failed to start subscribe, return code %s\n", MQTTAsync_strerror(rc));
+        finished = 1;
+    }
   }
 }
 
-void mqtt_sub_task(connect_t *cp) {
-  int fd, rc;
-
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
-
-  while (1) {
-    sleep(PERIOD);
-  }
+void onConnectFailure(void* context, MQTTAsync_failureData* response) {
+    fprintf(stderr, "Connect failed, rc %s\n", response ? MQTTAsync_strerror(response->code) : "none");
+    //finished = 1;
 }
 
-void mqtt_pub_task(connect_t *cp) {
+MQTTContext* MQTTClient (connect_t *ch) {
+  MQTTAsync   client;
+  MQTTContext* context = malloc(sizeof(MQTTContext));
+  MQTTAsync_connectOptions opts = MQTTAsync_connectOptions_initializer;
+  char address [BUFSIZ], clientid[BUFSIZ];
+  int rc;
+
+  sprintf(address, "%s:%d", ch->host, ch->port);
+  sprintf(clientid,"%s", ch->name);
+  printf("%s %s \n", address, clientid);
+  MQTTAsync_create (&client, address, clientid, MQTTCLIENT_PERSISTENCE_NONE, NULL);
+  context->client = client;
+  context->ch     = ch;
+
+  opts.keepAliveInterval  = 20;
+  opts.cleansession       = 1;
+  opts.onSuccess          = onConnect;
+  opts.onFailure          = onConnectFailure;
+  opts.context            = context;
+  opts.MQTTVersion        = MQTTVERSION_DEFAULT;
+  opts.automaticReconnect = 1;
+
+  if ((rc = MQTTAsync_connect(client, &opts)) != MQTTASYNC_SUCCESS) {
+    printf("Failed to start connect (%s), return code %d\n", address, rc);
+    return NULL;
+  }
+  return context;
+}
+  
+
+void mqtt_sub_task(connect_t *ch) {
   int fd, rc;
 
-  printf ("[%s] host: %s:%d (%x)\n", __FUNCTION__, cp->host, cp->port, getaddrbyhost(cp->host));
+  CONNECTmessage (ch, "MQTT  (S)");
 
-  while (1) {
-    sleep(PERIOD);
-  }
+  MQTTContext* context = MQTTClient(ch);
+
+  while (!finished) usleep(10000L);
+  MQTTAsync_destroy(&context->client);
+  return;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// MQTT-PUBLISHER
+//
+
+
+void mqtt_pub_task(connect_t *ch) {
+  int fd, rc;
+
+  CONNECTmessage (ch, "MQTT  (P)");
+  MQTTContext* context = MQTTClient(ch);
+
+  while (!finished) usleep(10000L);
+  MQTTAsync_destroy(&context->client);
 }
 
 
 
 static void* task(void* args) {
-  connect_t *cp = (connect_t*)args;
-  if(!cp) return;
+  connect_t *ch = (connect_t *) args;
+  if(!ch) return;
 
   char path[BUFSIZ];
 
-  if(!strcmp(cp->type, "MODBUS-TCP-SERVER")) modbus_server_task(cp);
-  if(!strcmp(cp->type, "MODBUS-TCP-CLIENT")) modbus_client_task(cp);
-  if(!strcmp(cp->type, "TCP-SERVER"))        tcp_server_task(cp);
-  if(!strcmp(cp->type, "TCP-CLIENT"))        tcp_client_task(cp);
-  if(!strcmp(cp->type, "UDP-SERVER"))        udp_server_task(cp);
-  if(!strcmp(cp->type, "UDP-CLIENT"))        udp_client_task(cp);
-  if(!strcmp(cp->type, "HTTP-SERVER"))       http_server_task(cp);
-  if(!strcmp(cp->type, "HTTP-CLIENT"))       http_client_task(cp);
-  if(!strcmp(cp->type, "MQTT-SUBSCRIBER"))   mqtt_sub_task(cp);
-  if(!strcmp(cp->type, "MQTT-PUBLISHER"))    mqtt_pub_task(cp);
+  if(!strcmp (ch->type, "MODBUS-TCP-SERVER")) modbus_server_task (ch);
+  if(!strcmp (ch->type, "MODBUS-TCP-CLIENT")) modbus_client_task (ch);
+  if(!strcmp (ch->type, "TCP-SERVER"))        tcp_server_task (ch);
+  if(!strcmp (ch->type, "TCP-CLIENT"))        tcp_client_task (ch);
+  if(!strcmp (ch->type, "UDP-SERVER"))        udp_server_task (ch);
+  if(!strcmp (ch->type, "UDP-CLIENT"))        udp_client_task (ch);
+  if(!strcmp (ch->type, "HTTP-SERVER"))       http_server_task (ch);
+  if(!strcmp (ch->type, "HTTP-CLIENT"))       http_client_task (ch);
+  if(!strcmp (ch->type, "MQTT-SUBSCRIBER"))   mqtt_sub_task (ch);
+  if(!strcmp (ch->type, "MQTT-PUBLISHER"))    mqtt_pub_task (ch);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -332,19 +549,21 @@ void getFiles (char* d) {
 
         sprintf(path, "%s/%s", d, ep->d_name);
 
-        connect_t *cp = calloc(1, sizeof(connect_t));
-        CH[max_thread] = cp;
+        connect_t *ch = calloc(1, sizeof(connect_t));
+        CH[max_thread] = ch;
 
-        strcpy(cp->path, path);
-        getconf(path, "name",      cp->name);
-        getconf(path, "host",      cp->host);
-        getconf(path, "type",      cp->type);
-        getconf(path, "topic",     cp->topic);
-        getconf(path, "port", v);  cp->port = atoi(v);
-        getconf(path, "queue", v); cp->queue = atol(v);
-        cp->id = max_thread;
+        //strcpy(ch->path, path);
+        getconf(path, "name",         ch->name);
+        getconf(path, "host",         ch->host);
+        getconf(path, "type",         ch->type);
+        getconf(path, "topic",        ch->topic);
+        getconf(path, "port", v);     ch->port = atoi(v);
+        getconf(path, "messageq", v); ch->queue = strtol(v, NULL, 16);
+        ch->id = max_thread;
 
-        pthread_create(&cp->th, NULL, task, cp);
+        printf("initq %s %lx \n", ch->name, ch->queue);
+        initq (ch->queue);
+        pthread_create(&ch->th, NULL, task, ch);
         max_thread++;
       }
     }
@@ -367,8 +586,8 @@ main (int argc, char *argv[])
   getFiles ("/opt/radix/gateway.d");
 
   for (int i = 0; CH[i] != NULL; i++) {
-    connect_t *cp = CH[i];
-    pthread_join(cp->th, NULL);
+    connect_t *ch = CH[i];
+    pthread_join(ch->th, NULL);
   }
   pthread_exit (0);
 }
