@@ -22,7 +22,7 @@
 #include "sock.h"
 
 #define MAX_THREAD 100
-#define PERIOD     1
+#define PERIOD     60
 
 typedef struct {
   pthread_t th;
