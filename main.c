@@ -22,18 +22,26 @@
 #include "sock.h"
 
 #define MAX_THREAD 100
-#define PERIOD     60
+#define PERIOD     5
 
 typedef struct {
   pthread_t th;
   int       id; 
   char      path[64];
-  char      name[64];
-  char      host[64];
-  char      type[64];
-  char      topic[64];
+  char      gateway[64];
   long      queue;
+  char      name[64];
+  char      type[64];
+  char      host[64];
   uint16_t  port; 
+  char      username[64];
+  char      password[64];
+  char      topic[64];
+  char      base[64];
+  int       offs;
+  int       blck;
+  char      data[64];
+  char      body[64];
 } connect_t; 
 
 typedef struct {
@@ -100,7 +108,7 @@ void modbus_client_task(connect_t *ch) {
       sleep(PERIOD);
       continue;
     }
-    if ((rc = modbus_read_registers(mb, 0, 5, tab_registers)) < 0) {
+    if ((rc = modbus_read_registers(mb, ch->offs, ch->blck, tab_registers)) < 0) {
       fprintf(stderr, "%s\n", modbus_strerror(errno));
     }
     else {
@@ -243,29 +251,31 @@ void tcp_server_task(connect_t *ch) {
           close (sockfd);
           printf("%s| -- client disconnected. (fd: %d) \n", MYTASK, sockfd);
         }
-        printf ("%s| -- tcp data received. (fd:%d, %d bytes) \n", MYTASK, sockfd, nbyte);
+        else 
+          printf ("%s| -- tcp data received. (fd:%d, %d bytes) \n", MYTASK, sockfd, nbyte);
+          dump((char*)message, nbyte);
       }
     }
   }
 }
 
 void tcp_client_task(connect_t *ch) {
-  int fd, nbyte;
+  int sockfd, nbyte;
   char message[BUFSIZ];
 
   CONNECTmessage(ch, "TCP   (C)");
   while (1) {
-    if((fd = tcp_connect(ch->host, ch->port)) < 0) {
+    if((sockfd = tcp_connect(ch->host, ch->port)) < 0) {
+      printf("TCP|CLIENT|Connection failed \n");
       sleep (PERIOD);
       continue;
     }
-
-    strcpy(message, "HELLO WORLD");
-    if((nbyte=send(fd, message, strlen(message), 0)) < 0) {
-      close (fd);
-      continue;
+    if((nbyte=recv(sockfd, message, BUFSIZ, 0)) > 0) {
+      printf ("%s| -- tcp data received. (fd:%d, %d bytes) \n", MYTASK, sockfd, nbyte);
+      dump((char*)message, nbyte);
+      sendq(ch->queue, (char*)message, nbyte);
     }
-    printf ("%s| -- tcp data sent. (fd:%d, %d bytes) \n", MYTASK, fd, nbyte);
+    close(sockfd);
 
     sleep(PERIOD);
   }
@@ -280,7 +290,8 @@ void udp_server_task(connect_t *ch) {
 
   CONNECTmessage(ch, "UDP   (S)");
 
-  fd = udphostsock(ch->host, ch->port);
+  //fd = udphostsock(ch->host, ch->port);
+  fd = udpsock(ch->port);
   FD_ZERO(&rfds);
   FD_SET(fd, &rfds);
 
@@ -293,6 +304,7 @@ void udp_server_task(connect_t *ch) {
     if(FD_ISSET(fd,&fds)) {
       nbyte = recvfrom(fd, message, BUFSIZ, 0, (struct sockaddr*)&sin, &slen);
       printf ("%s| -- udp data received. (fd:%d, %d bytes) \n", MYTASK, fd, nbyte);
+      dump((char*)message, nbyte);
     }
     sleep(PERIOD);
   }
@@ -304,18 +316,24 @@ void udp_client_task(connect_t *ch) {
   int fd, nbyte;
 
   CONNECTmessage(ch, "UDP   (C)");
+  fd = udpsock(0);
   while (1) {
-    fd = udpsock(0);
+    printf ("%s| -- udp client fd:%d \n", MYTASK,fd);
     bzero((char*)&sin,sizeof(sin));
     sin.sin_family      = AF_INET;
     sin.sin_addr.s_addr = getaddrbyhost(ch->host);
     sin.sin_port        = htons(ch->port);
 
-    strcpy(message, "HELLO WORLD");
+    strcpy(message, "GET");
     if((nbyte=sendto(fd, message, strlen(message), 0, (struct sockaddr*)&sin, sizeof(sin))) <= 0) {
       continue;
     }
     printf ("%s| -- udp data sent. (%d bytes) \n", MYTASK,strlen(message));
+    if((nbyte=recv(fd, message, BUFSIZ, 0)) > 0) {
+      printf ("%s| -- udp data received. (fd:%d, %d bytes) \n", MYTASK, fd, nbyte);
+      dump((char*)message, nbyte);
+      sendq(ch->queue, (char*)message, nbyte);
+    }
     sleep (PERIOD);
   }
 }
@@ -335,6 +353,14 @@ static int begin_request_handler(struct httplib_context *ctx, struct httplib_con
     int nbyte = httplib_read(ctx, conn, content, sizeof(content));
     dump(content, nbyte);
     sendq(ch->queue, (char*)content, nbyte);
+
+    int content_length = snprintf(content, sizeof(content), "Hello from connect! Remote port: %d", ri->remote_port);
+    httplib_printf(ctx, conn,
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/plain\r\n"
+      "Content-Length: %d\r\n"
+      "\r\n"
+      "%s", content_length, content);
   } 
   else {
     int content_length = snprintf(content, sizeof(content), "Hello from connect! Remote port: %d", ri->remote_port);
@@ -414,6 +440,7 @@ void http_client_task(connect_t *ch) {
     curl = curl_easy_init();
     sprintf(uri, "http://%s:%d/", ch->host, ch->port);
 
+    printf("%s\n",uri);
     curl_easy_setopt (curl, CURLOPT_URL, uri);
     curl_easy_setopt (curl, CURLOPT_SSL_VERIFYPEER, 0);
     curl_easy_setopt (curl, CURLOPT_SSL_VERIFYHOST, 0);
@@ -423,6 +450,8 @@ void http_client_task(connect_t *ch) {
     if((res = curl_easy_perform (curl)) != CURLE_OK) {
       fprintf(stderr, "Failed %s \n", curl_easy_strerror(res));
     }
+    printf ("%s| -- http data recieved. (%d bytes) \n", MYTASK, body.len);
+    dump((char*)body.ptr, body.len);
     sendq(ch->queue, (char*)body.ptr, body.len);
     curl_easy_cleanup(curl);
     sleep(PERIOD);
@@ -447,7 +476,7 @@ typedef struct {
 } MQTTContext;
 
 int messageArrived(void *context, char *topicName, int topicLen, MQTTAsync_message *message) {
-    connect_t* ch = (connect_t*)context;
+    connect_t* ch = ((MQTTContext*)context)->ch;
     printf("[mqtt] received %d Bytes, Topic: %s, ", message->payloadlen, topicName);
     printf("Payload: %.*s\n", message->payloadlen, (char*)message->payload);
 
@@ -584,16 +613,16 @@ static void* task(void* args) {
 
   char path[BUFSIZ];
 
-  if(!strcmp (ch->type, "MODBUS-TCP-SERVER")) modbus_server_task (ch);
-  if(!strcmp (ch->type, "MODBUS-TCP-CLIENT")) modbus_client_task (ch);
-  if(!strcmp (ch->type, "TCP-SERVER"))        tcp_server_task (ch);
-  if(!strcmp (ch->type, "TCP-CLIENT"))        tcp_client_task (ch);
-  if(!strcmp (ch->type, "UDP-SERVER"))        udp_server_task (ch);
-  if(!strcmp (ch->type, "UDP-CLIENT"))        udp_client_task (ch);
-  if(!strcmp (ch->type, "HTTP-SERVER"))       http_server_task (ch);
-  if(!strcmp (ch->type, "HTTP-CLIENT"))       http_client_task (ch);
-  if(!strcmp (ch->type, "MQTT-SUBSCRIBER"))   mqtt_sub_task (ch);
-  if(!strcmp (ch->type, "MQTT-PUBLISHER"))    mqtt_pub_task (ch);
+  if(!strcmp (ch->type, "MODBUS-SERVER"))   modbus_server_task (ch);
+  if(!strcmp (ch->type, "MODBUS-CLIENT"))   modbus_client_task (ch);
+  if(!strcmp (ch->type, "TCP-SERVER"))      tcp_server_task (ch);
+  if(!strcmp (ch->type, "TCP-CLIENT"))      tcp_client_task (ch);
+  if(!strcmp (ch->type, "UDP-SERVER"))      udp_server_task (ch);
+  if(!strcmp (ch->type, "UDP-CLIENT"))      udp_client_task (ch);
+  if(!strcmp (ch->type, "HTTP-SERVER"))     http_server_task (ch);
+  if(!strcmp (ch->type, "HTTP-CLIENT"))     http_client_task (ch);
+  if(!strcmp (ch->type, "MQTT-SUBSCRIBER")) mqtt_sub_task (ch);
+  if(!strcmp (ch->type, "MQTT-PUBLISHER"))  mqtt_pub_task (ch);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -624,15 +653,22 @@ void getFiles (char* d) {
         CH[max_thread] = ch;
 
         //strcpy(ch->path, path);
-        getconf(path, "name",         ch->name);
-        getconf(path, "host",         ch->host);
-        getconf(path, "type",         ch->type);
-        getconf(path, "topic",        ch->topic);
-        getconf(path, "port", v);     ch->port = atoi(v);
+        getconf(path, "gateway",      ch->gateway);
         getconf(path, "messageq", v); ch->queue = strtol(v, NULL, 16);
+        getconf(path, "name",         ch->name);
+        getconf(path, "type",         ch->type);
+        getconf(path, "host",         ch->host);
+        getconf(path, "port", v);     ch->port = atoi(v);
+        getconf(path, "username",     ch->username);
+        getconf(path, "password",     ch->password);
+        getconf(path, "topic",        ch->topic);
+        getconf(path, "offs", v);     ch->offs = atoi(v);
+        getconf(path, "blck", v);     ch->blck = atoi(v);
+        getconf(path, "data",         ch->data);
+        getconf(path, "body",         ch->body);
         ch->id = max_thread;
 
-        initq (ch->queue);
+        //initq (ch->queue);
         pthread_create(&ch->th, NULL, task, ch);
         max_thread++;
       }

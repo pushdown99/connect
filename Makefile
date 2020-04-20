@@ -8,7 +8,7 @@ SRCS = main.c
 OBJS = $(SRCS:.c=.o)
 LIBS = -L./lib -lpopup -lpthread -L/usr/local/lib -lmodbus -L./libhttp/lib -lhttp -lpaho-mqtt3a -lm -lrt -ldl -lcurl
 
-TARGET 	= connect
+TARGET 	= radix-connect
 TESTS = modbus-server modbus-client udp-server udp-client tcp-server tcp-client tcp-test ipc-test
 
 all: $(TARGET) $(TESTS)
@@ -45,3 +45,10 @@ tcp-test: tcp-test.c
 
 ipc-test: ipc-test.c
 	$(CC) -o $@ $(CFLAGS) $< $(LIBS)
+
+install:
+	cp -a $(TARGET) $(TESTS) ../bin
+	cp -a libhttp/lib/libhttp.a ../lib
+	cp -a libmodbus-3.1.6/src/.libs/libmodbus.*so* ../lib
+	cp -f libmodbus-3.1.6/src/libmodbus.* ../lib
+	cp -a paho.mqtt.c/build/output/*.so.* ../lib

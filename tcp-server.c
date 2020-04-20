@@ -7,6 +7,8 @@
 
 #define PERIOD 1
 
+int temperature = 15;
+
 int tcp_server (char* host, uint16_t port)
 {
   struct sockaddr_in sin;
@@ -44,6 +46,21 @@ int tcp_server (char* host, uint16_t port)
     }
     for(int sockfd = lfd + 1; sockfd <= maxfd; sockfd++) {
       if(FD_ISSET(sockfd, &fds)) {
+        
+        temperature += 1;
+        int data = htonl(temperature);
+/*
+        if (send(sockfd, (char*)&data, sizeof(temperature), 0) == -1){
+          printf("Send failed\n");
+          FD_CLR (sockfd, &rfds);
+          close (sockfd);
+          printf("%s| -- client disconnected. (fd: %d) \n", MYTASK, sockfd);
+          continue;
+        }
+        else 
+          printf("send fd:%d... %d %d bytes\n", sockfd, temperature, sizeof(temperature));
+*/
+
         nbyte = recvfrom(sockfd, message, BUFSIZ, 0, (struct sockaddr*)&sin, &slen);
         if(nbyte <= 0) {
           FD_CLR (sockfd, &rfds);
@@ -51,6 +68,8 @@ int tcp_server (char* host, uint16_t port)
           printf("%s| -- client disconnected. (fd: %d) \n", MYTASK, sockfd);
         }
         printf ("%s| -- tcp data received. (fd:%d, %d bytes) \n", MYTASK, sockfd, nbyte);
+        send(sockfd, (char*)&data, sizeof(temperature), 0);
+        printf ("%s| -- tcp data sent (fd:%d, temperature:%d, %d bytes\n", MYTASK, sockfd, temperature, sizeof(temperature));
       }
     }
   }
@@ -58,6 +77,6 @@ int tcp_server (char* host, uint16_t port)
 
 int main()
 {
-  tcp_server ("127.0.0.1", 9007);
+  tcp_server ("0.0.0.0", 9007);
 }
 
